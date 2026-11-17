@@ -5,16 +5,16 @@ import path from 'node:path';
 
 const dist = path.resolve(process.argv[2] || 'dist-buyer');
 const html = await readFile(path.join(dist, 'index.html'), 'utf8');
-const title = '<title>BZEAD UK - United Kingdom Marketplace</title>';
-const description = 'Shop products from the BZEAD marketplace in the United Kingdom.';
-if (!html.includes(title) || !html.includes(description)) {
-  throw new Error('Built app shell is missing the expected title or description');
+const title = /<title>[^<]*<\/title>/gi;
+const description = /<meta\s+name="description"\s+content="[^"]*"\s*\/?>/gi;
+if ((html.match(title) || []).length !== 1 || (html.match(description) || []).length !== 1) {
+  throw new Error('Built app shell must contain exactly one title and description');
 }
 const page = html
-  .replace(title, '<title>Delete Account Policy - BZEAD UK</title>')
+  .replace(title, '<title>Delete Account Policy - BZEAD</title>')
   .replace(
     description,
-    'Learn how to request deletion of your BZEAD account and personal data.',
+    '<meta name="description" content="Learn how to request deletion of your BZEAD account and personal data." />',
   );
 const destination = path.join(dist, 'deleteaccount');
 await mkdir(destination, { recursive: true });

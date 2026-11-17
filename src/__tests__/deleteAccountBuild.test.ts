@@ -8,25 +8,26 @@ import { expect, it } from 'vitest';
 it('generates a directly addressable legal page with the built app shell and specific metadata', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'bzead-delete-account-'));
   try {
-    await writeFile(path.join(dir, 'index.html'), [
-      '<meta name="description" content="Shop products from the BZEAD marketplace in the United Kingdom." />',
-      '<title>BZEAD UK - United Kingdom Marketplace</title>',
-      '<div id="root"></div><script src="/assets/app.js"></script>',
-    ].join('\n'));
+    const appShell = await readFile('index.html', 'utf8');
+    await writeFile(path.join(dir, 'index.html'), appShell);
     execFileSync(process.execPath, ['scripts/generate-delete-account-page.mjs', dir]);
     const html = await readFile(path.join(dir, 'deleteaccount', 'index.html'), 'utf8');
-    expect(html).toContain('<title>Delete Account Policy - BZEAD UK</title>');
+    expect(html).toContain('<title>Delete Account Policy - BZEAD</title>');
     expect(html).toContain('Learn how to request deletion');
-    expect(html).toContain('<div id="root"></div><script src="/assets/app.js"></script>');
+    expect(html).toContain('<div id="root"></div>');
+    expect(html).toContain('<script type="module" src="/src/main.tsx"></script>');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-it('fails rather than generating incorrect metadata when the app shell changes', async () => {
+it.each([
+  '<div id="root"></div>',
+  '<title>First</title><title>Second</title><meta name="description" content="Description" />',
+])('fails rather than generating incorrect metadata for an invalid app shell', async (appShell) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'bzead-delete-account-'));
   try {
-    await writeFile(path.join(dir, 'index.html'), '<div id="root"></div>');
+    await writeFile(path.join(dir, 'index.html'), appShell);
     expect(() => execFileSync(process.execPath, ['scripts/generate-delete-account-page.mjs', dir], { stdio: 'pipe' }))
       .toThrow();
   } finally {
