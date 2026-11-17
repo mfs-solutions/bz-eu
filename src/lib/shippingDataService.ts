@@ -29,6 +29,14 @@ export interface Country {
   currency_code: string;
   dialing_code: string;
   is_active: boolean;
+  iso2?: string;
+}
+
+export function isCountryInOptions(value: string, countries: Country[]): boolean {
+  const token = value.trim().toUpperCase();
+  return token !== '' && countries.some((country) =>
+    [country.country_name, country.country_code, country.short_code, country.iso2]
+      .some((candidate) => candidate?.trim().toUpperCase() === token));
 }
 
 export interface State {
@@ -85,6 +93,15 @@ export async function fetchCountries() {
   const { data, error } = await supabase
     .from('countries')
     .select('id, country_name, country_code, short_code, currency_code, dialing_code, is_active')
+    .eq('is_active', true)
+    .order('country_name');
+  return { data: (data || []) as Country[], error: error?.message || null };
+}
+
+export async function fetchEuCountries() {
+  const { data, error } = await supabase
+    .from('EU_COUNTRIES')
+    .select('id, country_name, country_code, short_code, currency_code, dialing_code, is_active, iso2')
     .eq('is_active', true)
     .order('country_name');
   return { data: (data || []) as Country[], error: error?.message || null };

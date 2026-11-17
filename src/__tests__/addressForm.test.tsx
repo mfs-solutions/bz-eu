@@ -1,16 +1,29 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import AddressForm, { type Address } from '../components/AddressForm';
 
-vi.mock('../lib/shippingDataService', () => ({
+const mocks = vi.hoisted(() => ({ isEu: false, fetchEuCountries: vi.fn() }));
+vi.mock('../lib/supabase', () => ({ supabase: {} }));
+vi.mock('../config/market', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../config/market')>()),
+  get IS_EU_STOREFRONT() { return mocks.isEu; },
+}));
+vi.mock('../lib/shippingDataService', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../lib/shippingDataService')>()),
   fetchCountries: vi.fn().mockResolvedValue({
     data: [{ id: 'gb', country_name: 'United Kingdom' }],
     error: null,
   }),
+  fetchEuCountries: mocks.fetchEuCountries,
 }));
 
 describe('AddressForm', () => {
+  beforeEach(() => {
+    mocks.isEu = false;
+    mocks.fetchEuCountries.mockReset();
+  });
+
   it('validates required fields and submits a complete new address', async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
@@ -76,5 +89,38 @@ describe('AddressForm', () => {
     }));
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(onCancel).toHaveBeenCalledOnce();
+  });
+
+  it('uses the EU table for address editing and requires an allowed country', async () => {
+    mocks.isEu = true;
+    mocks.fetchEuCountries.mockResolvedValue({
+      data: [{ id: 'fr', country_name: 'France', country_code: 'FRA', short_code: 'FRA', iso2: 'FR' }],
+      error: null,
+    });
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const address: Address = {
+      id: 'address-1', fullName: 'Test Buyer', phoneNumber: '+447700900000',
+      email: 'buyer@example.com', country: 'United Kingdom', streetAddress1: '12 Main Street',
+      city: 'London', state: 'London', postalCode: 'SW1A 1AA', addressType: 'home',
+      isDefault: true, createdAt: '2026-01-01', updatedAt: '2026-01-01',
+    };
+    render(<AddressForm initialData={address} onSubmit={onSubmit} onCancel={vi.fn()} />);
+    expect(await screen.findByRole('option', { name: 'France' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'United Kingdom' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Update address' }));
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByText('Please select an available EU delivery country.')).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText(/Country \/ Region/), 'France');
+    await user.click(screen.getByRole('button', { name: 'Update address' }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ country: 'France' }));
+  });
+
+  it('prevents EU address submission when the country lookup fails', async () => {
+    mocks.isEu = true;
+    mocks.fetchEuCountries.mockResolvedValue({ data: [], error: 'Network error' });
+    render(<AddressForm onSubmit={vi.fn()} onCancel={vi.fn()} />);
+    expect(await screen.findByText(/Unable to load countries/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save address' })).toBeDisabled();
   });
 });

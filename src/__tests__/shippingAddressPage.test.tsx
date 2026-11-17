@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   createAddress: vi.fn(),
   pricing: vi.fn(),
   countries: vi.fn(),
+  euCountries: vi.fn(),
   isEu: false,
   rates: { GBP: 1 },
   items: [{
@@ -50,8 +51,11 @@ vi.mock('../lib/checkoutPricingService', () => ({ calculateDestinationCheckoutPr
 vi.mock('../lib/pricingService', () => ({
   fetchPublicProductPrices: vi.fn().mockResolvedValue({ data: [], error: null }),
 }));
-vi.mock('../lib/shippingDataService', () => ({
+vi.mock('../lib/supabase', () => ({ supabase: {} }));
+vi.mock('../lib/shippingDataService', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../lib/shippingDataService')>()),
   fetchCountries: mocks.countries,
+  fetchEuCountries: mocks.euCountries,
 }));
 vi.mock('../lib/locationService', () => ({ detectLocationWithCaching: vi.fn() }));
 vi.mock('../utils/currency', () => ({
@@ -77,6 +81,7 @@ describe('checkout shipping addresses', () => {
     vi.clearAllMocks();
     mocks.isEu = false;
     mocks.countries.mockResolvedValue({ data: [], error: null });
+    mocks.euCountries.mockResolvedValue({ data: [], error: null });
     mocks.getAddresses.mockResolvedValue({ data: [ukAddress, overseasAddress], error: null });
     mocks.pricing.mockResolvedValue({ subtotal: 10, total: 12, shipping: 2, currency: 'GBP', items: [] });
   });
@@ -155,41 +160,55 @@ describe('checkout shipping addresses', () => {
     expect(await screen.findByText(/12 High Street/)).toBeInTheDocument();
   });
 
-  it('only offers European countries and saved addresses on the EU storefront', async () => {
+  it('uses the EU countries table for options and saved addresses', async () => {
     mocks.isEu = true;
     mocks.getAddresses.mockResolvedValue({
       data: [ukAddress, { ...ukAddress, id: 'fr', country: 'France', street_address_1: 'Rue de Paris' }, overseasAddress],
       error: null,
     });
-    mocks.countries.mockResolvedValue({
+    mocks.euCountries.mockResolvedValue({
       data: [
         { id: 'fr', country_name: 'France', country_code: 'FR', short_code: 'FRA' },
-        { id: 'gb', country_name: 'United Kingdom', country_code: 'GB', short_code: 'GBR' },
-        { id: 'in', country_name: 'India', country_code: 'IN', short_code: 'IND' },
+        { id: 'cz', country_name: 'Czech Republic', country_code: 'CZ', short_code: 'CZE' },
       ], error: null,
     });
     renderPage();
     expect(await screen.findByText(/Rue de Paris/)).toBeInTheDocument();
-    expect(screen.getByText(/12 High Street/)).toBeInTheDocument();
+    expect(screen.queryByText(/12 High Street/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Other Street/)).not.toBeInTheDocument();
     await waitFor(() => expect(mocks.pricing).toHaveBeenCalledWith(expect.objectContaining({
       targetCurrency: 'EUR',
     })));
     fireEvent.click(screen.getByRole('button', { name: 'Add New' }));
     expect(screen.getByRole('option', { name: 'France' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'United Kingdom' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Czech Republic' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'United Kingdom' })).not.toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'India' })).not.toBeInTheDocument();
+    expect(mocks.euCountries).toHaveBeenCalled();
+    expect(mocks.countries).not.toHaveBeenCalled();
   });
 
-  it('does not restore a non-European checkout draft', async () => {
+  it('does not restore a country absent from the EU table', async () => {
     mocks.isEu = true;
     mocks.getAddresses.mockResolvedValue({ data: [], error: null });
     localStorage.setItem('beauzead_checkout_shipping_draft:EU:buyer', JSON.stringify({
-      formData: { country: 'India', street_address_1: 'Draft Road' },
+      formData: { country: 'United Kingdom', street_address_1: 'Draft Road' },
     }));
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Add a new address' }));
     expect(screen.getByLabelText('Country')).toHaveValue('');
-    expect(screen.queryByRole('option', { name: 'India' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'United Kingdom' })).not.toBeInTheDocument();
+  });
+
+  it('shows an error and retries when the EU country lookup fails', async () => {
+    mocks.isEu = true;
+    mocks.euCountries.mockResolvedValueOnce({ data: [], error: 'Network error' })
+      .mockResolvedValueOnce({ data: [{ id: 'fr', country_name: 'France', country_code: 'FR', short_code: 'FRA' }], error: null });
+    mocks.getAddresses.mockResolvedValue({ data: [], error: null });
+    renderPage();
+    expect(await screen.findByRole('alert')).toHaveTextContent("couldn't load delivery countries");
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Add a new address' }));
+    expect(screen.getByRole('option', { name: 'France' })).toBeInTheDocument();
   });
 });

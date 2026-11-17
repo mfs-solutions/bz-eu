@@ -1,7 +1,11 @@
 # BZEAD EU
 
 European BZEAD buyer storefront using the shared Supabase marketplace backend.
-The EU build displays EUR and limits checkout delivery addresses to European countries.
+The EU build displays EUR and uses active entries in `EU_COUNTRIES` for delivery address selection.
+The table is initialized from `countries` and maintained separately; its exchange
+rates and other copied fields do not automatically follow changes to `countries`.
+The Bulgaria row uses EUR, correcting the outdated currency in `countries`.
+Checkout pricing continues to use the exchange rates in `countries`.
 EU hosted checkout is enabled by default; set `VITE_EU_HOSTED_CHECKOUT=false`
 to disable it at build time. The backend also requires
 `EU_HOSTED_CHECKOUT_ENABLED=true`. A complete live EUR payment and recovery

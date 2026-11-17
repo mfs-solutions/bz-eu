@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Home, Briefcase, MoreHorizontal } from 'lucide-react';
-import { fetchCountries, type Country } from '../lib/shippingDataService';
+import { fetchCountries, fetchEuCountries, isCountryInOptions, type Country } from '../lib/shippingDataService';
+import { IS_EU_STOREFRONT } from '../config/market';
 
 export interface Address {
   id: string;
@@ -60,7 +61,7 @@ const AddressForm: React.FC<AddressFormProps> = ({
 
     const loadCountries = async () => {
       try {
-        const { data, error } = await fetchCountries();
+        const { data, error } = await (IS_EU_STOREFRONT ? fetchEuCountries() : fetchCountries());
         if (!isCurrent) return;
         if (error) throw new Error(error);
         setCountries(data || []);
@@ -97,6 +98,10 @@ const AddressForm: React.FC<AddressFormProps> = ({
         newErrors[field] = `${field.replace(/([A-Z])/g, ' $1').trim()} is required`;
       }
     });
+
+    if (IS_EU_STOREFRONT && formData.country && !isCountryInOptions(formData.country, countries)) {
+      newErrors.country = 'Please select an available EU delivery country.';
+    }
 
     // Email validation
     if (formData.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
@@ -220,11 +225,12 @@ const AddressForm: React.FC<AddressFormProps> = ({
               name="country"
               value={formData.country || ''}
               onChange={handleChange}
-              disabled={countriesLoading}
+              disabled={countriesLoading || countriesError}
               className={inputClass('country')}
             >
               <option value="">Select a country</option>
-              {formData.country && !countries.some((country) => country.country_name === formData.country) && (
+              {formData.country && !countries.some((country) => country.country_name === formData.country)
+                && (!IS_EU_STOREFRONT || isCountryInOptions(formData.country, countries)) && (
                 <option value={formData.country}>{formData.country}</option>
               )}
               {countries.map((country) => (
@@ -358,7 +364,7 @@ const AddressForm: React.FC<AddressFormProps> = ({
             <span>Set as default address</span>
           </label>
           <div className="addr-actions">
-            <button type="submit" disabled={isLoading} className="addr-btn addr-btn--primary">
+            <button type="submit" disabled={isLoading || (IS_EU_STOREFRONT && (countriesLoading || countriesError))} className="addr-btn addr-btn--primary">
               {isLoading ? 'Saving...' : initialData ? 'Update address' : 'Save address'}
             </button>
             <button type="button" onClick={onCancel} className="addr-btn addr-btn--secondary">

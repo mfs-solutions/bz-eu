@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { MapPin, Plus, Loader2, Home, Building2, MoreHorizontal, ArrowLeft, PlusCircle, Bookmark, User, Phone, Mail, Map, Save } from 'lucide-react';
 import { useCart } from '../../contexts/CartContext';
@@ -16,11 +16,10 @@ import {
 import { fetchPublicProductPrices } from '../../lib/pricingService';
 import { hasCurrencyRate, isExchangeRateUnavailable } from '../../utils/currency';
 import { detectLocationWithCaching } from '../../lib/locationService';
-import { fetchCountries, type Country } from '../../lib/shippingDataService';
+import { fetchCountries, fetchEuCountries, isCountryInOptions, type Country } from '../../lib/shippingDataService';
 import {
   IS_UK_STOREFRONT,
   IS_EU_STOREFRONT,
-  isEuropeanCountry,
   isUKCountry,
   STOREFRONT_COUNTRY_CODE,
   STOREFRONT_COUNTRY_NAME,
@@ -89,6 +88,9 @@ const ShippingAddressPage: React.FC = () => {
   const [publicPriceLoading, setPublicPriceLoading] = useState(false);
   const [addressSelectionLoading, setAddressSelectionLoading] = useState(false);
   const [countryOptions, setCountryOptions] = useState<Country[]>([]);
+  const [countriesReady, setCountriesReady] = useState(!IS_EU_STOREFRONT);
+  const [countriesError, setCountriesError] = useState(false);
+  const [countriesRetry, setCountriesRetry] = useState(0);
   const [selectedCartItemIds, setSelectedCartItemIds] = useState<string[]>([]);
   const [draftOwnerId, setDraftOwnerId] = useState<string | null>(null);
   const [draftSaveError, setDraftSaveError] = useState(false);
@@ -97,6 +99,10 @@ const ShippingAddressPage: React.FC = () => {
   const draftRef = useRef<ShippingFormData | null>(null);
 
   const [formData, setFormData] = useState<ShippingFormData>(createEmptyShippingFormData);
+  const isAllowedEuCountry = useCallback(
+    (value: string): boolean => isCountryInOptions(value, countryOptions),
+    [countryOptions],
+  );
 
   // Load saved addresses from Supabase or fallback to localStorage
   useEffect(() => {
@@ -180,12 +186,18 @@ const ShippingAddressPage: React.FC = () => {
 
   useEffect(() => {
     const loadCountries = async () => {
-      const { data, error } = await fetchCountries();
+      const { data, error } = await (IS_EU_STOREFRONT ? fetchEuCountries() : fetchCountries());
       if (error) {
         console.error('Unable to load checkout countries:', error);
-        setError('Unable to load delivery countries. Please refresh and try again.');
+        if (IS_EU_STOREFRONT) {
+          setCountriesError(true);
+          setPageReady(true);
+        } else {
+          setError('Unable to load delivery countries. Please refresh and try again.');
+        }
         return;
       }
+      setCountriesError(false);
       const countries = data || [];
       setCountryOptions(
         IS_UK_STOREFRONT
@@ -193,20 +205,16 @@ const ShippingAddressPage: React.FC = () => {
               isUKCountry(country.country_name)
               || isUKCountry(country.country_code)
               || isUKCountry(country.short_code))
-          : IS_EU_STOREFRONT
-            ? countries.filter((country) =>
-                isEuropeanCountry(country.country_name)
-                || isEuropeanCountry(country.country_code)
-                || isEuropeanCountry(country.short_code))
-            : countries,
+          : countries,
       );
+      setCountriesReady(true);
     };
 
     void loadCountries();
-  }, []);
+  }, [countriesRetry]);
 
   useEffect(() => {
-    if (authLoading) return;
+    if (authLoading || !countriesReady) return;
     let cancelled = false;
     const loadSavedAddresses = async () => {
       try {
@@ -233,7 +241,7 @@ const ShippingAddressPage: React.FC = () => {
                   ]),
                 ) as ShippingFormData;
                 if (IS_UK_STOREFRONT) restoredDraft.country = STOREFRONT_COUNTRY_NAME;
-                if (IS_EU_STOREFRONT && !isEuropeanCountry(restoredDraft.country)) restoredDraft.country = '';
+                if (IS_EU_STOREFRONT && !isAllowedEuCountry(restoredDraft.country)) restoredDraft.country = '';
               }
             }
           } catch (err) {
@@ -271,7 +279,7 @@ const ShippingAddressPage: React.FC = () => {
           })) as UserAddress[];
           const supportedAddresses = IS_UK_STOREFRONT
             ? addresses.filter((address) => isUKCountry(address.country))
-            : IS_EU_STOREFRONT ? addresses.filter((address) => isEuropeanCountry(address.country)) : addresses;
+            : IS_EU_STOREFRONT ? addresses.filter((address) => isAllowedEuCountry(address.country)) : addresses;
           setSavedAddresses(supportedAddresses);
 
           const defaultAddress = supportedAddresses.find(addr => addr.is_default) || supportedAddresses[0];
@@ -325,7 +333,7 @@ const ShippingAddressPage: React.FC = () => {
 
     void loadSavedAddresses();
     return () => { cancelled = true; };
-  }, [user?.id, user?.full_name, user?.email, user?.phone, currentAuthUser?.userId, currentAuthUser?.email, authLoading, navigate, addressesRetry]);
+  }, [user?.id, user?.full_name, user?.email, user?.phone, currentAuthUser?.userId, currentAuthUser?.email, authLoading, navigate, addressesRetry, countriesReady, isAllowedEuCountry]);
 
   // Redirect if cart is empty
   useEffect(() => {
@@ -513,8 +521,8 @@ const ShippingAddressPage: React.FC = () => {
       setError('UK storefront shipping addresses must be in the United Kingdom.');
       return false;
     }
-    if (IS_EU_STOREFRONT && !isEuropeanCountry(formData.country)) {
-      setError('Please select a European delivery country.');
+    if (IS_EU_STOREFRONT && !isAllowedEuCountry(formData.country)) {
+      setError('Please select an EU delivery country.');
       return false;
     }
 
@@ -688,8 +696,8 @@ const ShippingAddressPage: React.FC = () => {
         setLocationError(detectError || 'Unable to fetch your location.');
         return;
       }
-      if (IS_EU_STOREFRONT && data.country && !isEuropeanCountry(data.country)) {
-        setLocationError('Your detected location is outside Europe. Please enter a European delivery address.');
+      if (IS_EU_STOREFRONT && data.country && !isAllowedEuCountry(data.country)) {
+        setLocationError('Your detected location is outside the available EU delivery countries.');
         return;
       }
 
@@ -742,7 +750,7 @@ const ShippingAddressPage: React.FC = () => {
             </button>
             <h1 className="text-xl font-bold text-slate-900">Shipping Address</h1>
           </div>
-          {!addressesError && (
+          {!addressesError && !countriesError && (
             <div className="mb-4 grid grid-cols-2 gap-3" role="tablist" aria-label="Address mode">
               <button type="button" role="tab" aria-selected={!useExistingAddress} onClick={handleNewAddress}
                 className={`ship-tab ${!useExistingAddress ? 'ship-tab--on' : ''}`}>
@@ -755,7 +763,14 @@ const ShippingAddressPage: React.FC = () => {
             </div>
           )}
 
-          {addressesError ? (
+          {countriesError ? (
+            <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+              <p>We couldn&apos;t load delivery countries. Please try again.</p>
+              <button type="button" className="mt-2 font-semibold underline" onClick={() => setCountriesRetry((count) => count + 1)}>
+                Retry
+              </button>
+            </div>
+          ) : addressesError ? (
             <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
               <p>We couldn&apos;t load your saved addresses. Please try again.</p>
               <button type="button" className="mt-2 font-semibold underline" onClick={() => setAddressesRetry((count) => count + 1)}>
@@ -910,7 +925,7 @@ const ShippingAddressPage: React.FC = () => {
                       ) : (
                         <>
                           <option value="">Select Country</option>
-                          {!hasSelectedCountryOption && formData.country && (!IS_EU_STOREFRONT || isEuropeanCountry(formData.country)) && (
+                          {!hasSelectedCountryOption && formData.country && (!IS_EU_STOREFRONT || isAllowedEuCountry(formData.country)) && (
                             <option value={formData.country}>{formData.country}</option>
                           )}
                           {countryOptions.map((country) => (
@@ -969,7 +984,7 @@ const ShippingAddressPage: React.FC = () => {
             </form>
           )}
 
-          {useExistingAddress && !addressesError && (
+          {useExistingAddress && !addressesError && !countriesError && (
             <div className="mt-4 space-y-3">
               {!selectedAddressId && savedAddresses.length > 0 && (
                 <p className="text-sm text-slate-600">Select an address or add a new one to continue.</p>
@@ -983,7 +998,7 @@ const ShippingAddressPage: React.FC = () => {
         </div>
         </div>{/* END LEFT COLUMN */}
 
-        {useExistingAddress && !addressesError && savedAddresses.length > 0 && (
+        {useExistingAddress && !addressesError && !countriesError && savedAddresses.length > 0 && (
           <div className="shipping-continue-bar">
             <button
               type="button"
