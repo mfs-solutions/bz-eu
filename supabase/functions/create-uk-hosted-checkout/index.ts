@@ -5,6 +5,10 @@ import { getOrCreateStripeCustomer } from "../create-payment-intent/customer.ts"
 const origins = new Set([
   "https://bzead.uk",
   "https://www.bzead.uk",
+  "https://bzead.eu",
+  "https://www.bzead.eu",
+  "https://bzead.us",
+  "https://www.bzead.us",
   "https://main.d2532vkjbofjsn.amplifyapp.com",
 ]);
 
@@ -56,10 +60,13 @@ Deno.serve(async (req: Request) => {
     if (error) throw error;
     const livemode = /^(sk|rk)_live_/.test(stripeKey);
     if (!snapshot || snapshot.user_id !== auth.user.id || snapshot.stripe_account_id !== accountId ||
-        snapshot.livemode !== livemode || snapshot.currency !== "gbp" ||
+        snapshot.livemode !== livemode || (snapshot.currency !== "gbp" && snapshot.currency !== "eur") ||
         !Number.isSafeInteger(snapshot.amount_minor) || snapshot.amount_minor <= 0 ||
         snapshot.amount_minor > 5_000_000 || snapshot.order_id || snapshot.closed_at) {
       return json({ error: "Checkout is no longer available" }, 409);
+    }
+    if (snapshot.currency === "eur" && Deno.env.get("EU_HOSTED_CHECKOUT_ENABLED") !== "true") {
+      return json({ error: "European hosted checkout is not enabled" }, 503);
     }
     const createdAt = Date.parse(snapshot.created_at);
     if (!Number.isFinite(createdAt) || Date.now() - createdAt > 5 * 60_000 || createdAt > Date.now() + 60_000) {
@@ -99,7 +106,7 @@ Deno.serve(async (req: Request) => {
         payment_method_remove: "enabled",
       },
       payment_intent_data: {
-        metadata: { uk_checkout_snapshot_id: snapshotId, uk_storefront: "bzead.uk" },
+        metadata: { uk_checkout_snapshot_id: snapshotId, uk_storefront: snapshot.currency === "eur" ? "bzead.eu" : "bzead.uk" },
       },
       line_items: [{
         price_data: {

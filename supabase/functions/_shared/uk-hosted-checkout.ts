@@ -1,7 +1,8 @@
-import Stripe from "https://esm.sh/stripe@17.7.0?target=deno";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import type Stripe from "https://esm.sh/stripe@17.7.0?target=deno";
+import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { isHostedCheckoutCurrency } from "./hosted-checkout-market.ts";
 
-type Database = ReturnType<typeof createClient>;
+type Database = SupabaseClient;
 
 export async function recoverUkHostedCheckout(
   stripe: Stripe,
@@ -12,7 +13,7 @@ export async function recoverUkHostedCheckout(
   userId?: string,
 ): Promise<
   | { status: "unpaid" | "expired" }
-  | { status: "paid"; orderId: string; paymentIntentId: string; snapshotId: string }
+  | { status: "paid"; orderId: string; paymentIntentId: string; snapshotId: string; currency: "gbp" | "eur" }
 > {
   if (!/^cs_(test|live)_[A-Za-z0-9]+$/.test(sessionId)) {
     throw new Error("Invalid checkout session ID");
@@ -20,7 +21,7 @@ export async function recoverUkHostedCheckout(
   const session = await stripe.checkout.sessions.retrieve(sessionId);
   const snapshotId = session.metadata?.uk_checkout_snapshot_id;
   if (!snapshotId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(snapshotId) ||
-      session.livemode !== livemode || session.currency !== "gbp" ||
+      session.livemode !== livemode || !isHostedCheckoutCurrency(session.currency) ||
       !session.amount_total || session.amount_total <= 0) {
     throw new Error("Invalid UK checkout session");
   }
@@ -45,7 +46,8 @@ export async function recoverUkHostedCheckout(
       payment.amount_received !== session.amount_total || payment.currency !== session.currency) {
     throw new Error("Captured payment does not match Checkout Session");
   }
-  const { data: order, error: recoveryError } = await db.rpc("recover_uk_hosted_checkout", {
+  const { data: order, error: recoveryError } = await db.rpc(
+    session.currency === "eur" ? "recover_eu_hosted_checkout" : "recover_uk_hosted_checkout", {
     p_snapshot_id: snapshotId,
     p_session_id: session.id,
     p_account_id: accountId,
@@ -57,5 +59,5 @@ export async function recoverUkHostedCheckout(
   if (recoveryError || typeof order?.id !== "string" || !order.id) {
     throw recoveryError || new Error("Order recovery returned no order");
   }
-  return { status: "paid", orderId: order.id, paymentIntentId: payment.id, snapshotId };
+  return { status: "paid", orderId: order.id, paymentIntentId: payment.id, snapshotId, currency: session.currency };
 }

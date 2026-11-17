@@ -126,13 +126,16 @@ const OrderSummaryPage: React.FC = () => {
   const pricingRequestRef = useRef(0);
   const publicPriceRequestRef = useRef(0);
   const proceedInFlightRef = useRef(false);
-  const useUkHostedCheckout = IS_UK_STOREFRONT
-    && !isNativePlatform
+  const checkoutHostname = typeof window !== 'undefined' ? window.location.hostname.toLowerCase() : '';
+  const useHostedCheckout = !isNativePlatform
     && resolveCheckoutPaymentProvider() === 'stripe'
-    && import.meta.env.VITE_UK_HOSTED_CHECKOUT === 'true'
-    && typeof window !== 'undefined'
-    && ['bzead.uk', 'www.bzead.uk', 'main.d2532vkjbofjsn.amplifyapp.com']
-      .includes(window.location.hostname.toLowerCase());
+    && ((IS_UK_STOREFRONT
+      && import.meta.env.VITE_UK_HOSTED_CHECKOUT === 'true'
+      && ['bzead.uk', 'www.bzead.uk', 'main.d2532vkjbofjsn.amplifyapp.com'].includes(checkoutHostname))
+      || (IS_EU_STOREFRONT
+        && import.meta.env.VITE_EU_HOSTED_CHECKOUT !== 'false'
+        && ['bzead.eu', 'www.bzead.eu'].includes(checkoutHostname)));
+  const euPaymentUnavailable = IS_EU_STOREFRONT && !useHostedCheckout;
 
   const activeCartItems = useMemo(
     () => items.filter((item) => selectedCartItemIds.includes(item.cartItemId)),
@@ -515,6 +518,7 @@ const OrderSummaryPage: React.FC = () => {
     && !minimumOrderNotMet
     && !pricingError
     && !productValidationWarning
+    && (!IS_EU_STOREFRONT || targetCurrency === 'EUR')
   );
 
   const calculateTotal = () => displayTotal;
@@ -524,7 +528,7 @@ const OrderSummaryPage: React.FC = () => {
   }, [activeCartItems, displayTotal, shippingData, shippingTier]);
 
   const handleProceedToPayment = async () => {
-    if (IS_EU_STOREFRONT) {
+    if (euPaymentUnavailable) {
       setProceedError('EU payments are unavailable until the checkout backend is configured.');
       return;
     }
@@ -632,7 +636,7 @@ const OrderSummaryPage: React.FC = () => {
       return;
     }
 
-    if (useUkHostedCheckout) {
+    if (useHostedCheckout) {
       const cartItemIds = checkoutItems
         .map(({ item }) => item.cartItemId)
         .filter((id): id is string => Boolean(id));
@@ -644,6 +648,7 @@ const OrderSummaryPage: React.FC = () => {
       }
 
       const quoteBody = {
+        ...(IS_EU_STOREFRONT ? { market: 'EU' } : {}),
         cartItemIds,
         shippingAddress: {
           street: shippingData.street,
@@ -693,7 +698,7 @@ const OrderSummaryPage: React.FC = () => {
             || typeof quote.snapshotId !== 'string'
             || typeof quote.total !== 'number'
             || typeof quote.currency !== 'string'
-            || quote.currency !== 'GBP'
+            || quote.currency !== (IS_EU_STOREFRONT ? 'EUR' : 'GBP')
           ) {
             throw new Error('The checkout quote is invalid. Please return to review.');
           }
@@ -755,7 +760,7 @@ const OrderSummaryPage: React.FC = () => {
         }
         window.location.assign(destination.href);
       } catch (error) {
-        console.error('[OrderSummary] UK Stripe hosted checkout failed:', error);
+        console.error('[OrderSummary] Stripe hosted checkout failed:', error);
         setProceedError(error instanceof Error ? error.message : 'Unable to open the Stripe payment page.');
         proceedInFlightRef.current = false;
         setProceedLoading(false);
@@ -1302,7 +1307,7 @@ const OrderSummaryPage: React.FC = () => {
                   {proceedError}
                 </div>
               )}
-              {IS_EU_STOREFRONT && (
+              {euPaymentUnavailable && (
                 <div role="status" className="bg-amber-50 border border-amber-200 text-amber-700 px-4 py-3 rounded-lg text-sm mb-3">
                   EU payments are unavailable until the checkout backend is configured.
                 </div>
@@ -1318,13 +1323,13 @@ const OrderSummaryPage: React.FC = () => {
               ) : (
                 <button
                   onClick={handleProceedToPayment}
-                  disabled={IS_EU_STOREFRONT || !isPricingReady || proceedLoading}
+                  disabled={euPaymentUnavailable || !isPricingReady || proceedLoading}
                   className="w-full py-2.5 lg:py-3.5 bg-[#ffd814] hover:bg-[#f7ca00] border border-[#fcd200] disabled:bg-gray-200 disabled:border-gray-300 text-[#0f1111] rounded-lg text-[15px] font-bold cursor-pointer transition-colors"
                 >
-                  {IS_EU_STOREFRONT
+                  {euPaymentUnavailable
                     ? 'Payment unavailable'
                     : proceedLoading
-                    ? useUkHostedCheckout ? 'Opening Stripe checkout...' : 'Verifying checkout...'
+                    ? useHostedCheckout ? 'Opening Stripe checkout...' : 'Verifying checkout...'
                     : pricingLoading
                     ? 'Refreshing Shipping...'
                     : deliveryEstimateLoading
@@ -1334,7 +1339,7 @@ const OrderSummaryPage: React.FC = () => {
                     : pricingError
                       ? 'Checkout config unavailable'
                     : isPricingReady
-                      ? useUkHostedCheckout
+                      ? useHostedCheckout
                         ? ukHostedCheckoutSnapshot?.requiresReview
                           ? 'Accept updated total and continue to Stripe'
                           : 'Continue to Stripe'

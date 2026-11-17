@@ -1,7 +1,13 @@
 import Stripe from "https://esm.sh/stripe@17.7.0?target=deno";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { calculateDestinationCheckoutPricing } from "../../../src/lib/checkoutPricingService.ts";
-import { isUKCountry } from "../../../src/config/market.ts";
+import { getEuropeanCountryCode } from "../../../src/config/market.ts";
+import { captureEuSellerUnitPrice } from "../_shared/eu-checkout-pricing.ts";
+import {
+  getHostedCheckoutMarket,
+  isEuropeanAddress,
+  isHostedCheckoutCountryAllowed,
+} from "../_shared/hosted-checkout-market.ts";
 import {
   calculateUkHostedCheckoutTotal,
   canReusePendingUkHostedCheckout,
@@ -15,6 +21,10 @@ import {
 const origins = new Set([
   "https://bzead.uk",
   "https://www.bzead.uk",
+  "https://bzead.eu",
+  "https://www.bzead.eu",
+  "https://bzead.us",
+  "https://www.bzead.us",
   "https://main.d2532vkjbofjsn.amplifyapp.com",
 ]);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -73,19 +83,31 @@ Deno.serve(async (req: Request) => {
         !isRecord(body.shippingAddress)) {
       return json({ error: "Invalid checkout details" }, 400);
     }
+    const market = getHostedCheckoutMarket(body.market, origin);
+    if (!market) return json({ error: "Invalid checkout market" }, 400);
+    if (market === "EU" && Deno.env.get("EU_HOSTED_CHECKOUT_ENABLED") !== "true") {
+      return json({ error: "European hosted checkout is not enabled" }, 503);
+    }
+    const currency = market === "EU" ? "EUR" : "GBP";
     const address = body.shippingAddress;
     for (const field of ["street", "city", "postalCode", "country"]) {
       if (typeof address[field] !== "string" || !address[field].trim() || address[field].length > 256) {
         return json({ error: "Please provide a complete delivery address" }, 400);
       }
     }
-    if (!isUKCountry(String(address.country))) return json({ error: "A UK delivery address is required" }, 400);
+    if (!isHostedCheckoutCountryAllowed(market, String(address.country)) ||
+        (market === "EU" && !isEuropeanAddress(String(address.country), address.countryCode))) {
+      return json({ error: market === "EU" ? "A European delivery address is required" : "A UK delivery address is required" }, 400);
+    }
+    const orderCountry = market === "EU" ? getEuropeanCountryCode(String(address.country)) : "United Kingdom";
+    if (!orderCountry) return json({ error: "A European delivery address is required" }, 400);
     const tier = body.shippingTier || "standard";
     if (tier !== "standard" && tier !== "premium" && tier !== "express") {
       return json({ error: "Invalid delivery option" }, 400);
     }
     const text = (value: unknown) => typeof value === "string" ? value.trim().slice(0, 1000) : "";
     const requestFingerprint = await fingerprintUkHostedCheckoutRequest({
+      ...(market === "EU" ? { market } : {}),
       cartItemIds: body.cartItemIds.map((id) => String(id)).sort(),
       shippingAddress: {
         street: text(address.street),
@@ -126,7 +148,13 @@ Deno.serve(async (req: Request) => {
       .is("order_id", null).is("closed_at", null).maybeSingle();
     if (activeError) throw activeError;
     if (active) {
-      if (active.stripe_account_id !== accountId || active.livemode !== livemode || active.currency !== "gbp") {
+      if (active.currency !== currency.toLowerCase()) {
+        return json({
+          error: "A checkout in another currency is already active. Please complete or cancel it first.",
+          status: "processing",
+        }, 409);
+      }
+      if (active.stripe_account_id !== accountId || active.livemode !== livemode) {
         throw new Error("Active checkout does not match UK Stripe configuration");
       }
       if (!active.stripe_session_id) {
@@ -176,7 +204,7 @@ Deno.serve(async (req: Request) => {
           ) {
             return json({
               snapshotId: active.id,
-              currency: "GBP",
+              currency,
               total,
               shipping,
               subtotal,
@@ -278,7 +306,7 @@ Deno.serve(async (req: Request) => {
       const rate = Number(row.exchange_rate);
       if (code && Number.isFinite(rate) && rate > 0 && !rates[code]) rates[code] = rate;
     }
-    if (!rates.GBP || !rates.INR) throw new Error("Required exchange rates are unavailable");
+    if (!rates[currency] || !rates.INR) throw new Error("Required exchange rates are unavailable");
     const productMap = new Map(products.map((product) => [product.id, product]));
     const stockRequired = new Map<string, { quantity: number; stock: number }>();
     for (const item of cart) {
@@ -328,6 +356,7 @@ Deno.serve(async (req: Request) => {
       destinationPostalCode: String(address.postalCode),
       rates,
       strict: true,
+      ...(market === "EU" ? { targetCurrency: currency } : {}),
     });
     const selected = (quote.intlShippingOptions || quote.ukDomesticShippingOptions)?.[tier];
     if ((tier !== "standard" && !selected) || quote.intlShippingError || quote.domesticShippingError ||
@@ -362,10 +391,12 @@ Deno.serve(async (req: Request) => {
         },
       };
     });
-    const { data: sharedTotals, error: sharedTotalsError } = await db.rpc("quote_uk_hosted_checkout_total", {
+    const { data: sharedTotals, error: sharedTotalsError } = await db.rpc(
+      market === "EU" ? "quote_eu_hosted_checkout_total" : "quote_uk_hosted_checkout_total", {
       p_items: rpcItems,
-      p_country: "United Kingdom",
+      p_country: orderCountry,
       p_shipping_charge: shipping,
+      ...(market === "EU" ? { p_subtotal: quote.subtotal } : {}),
     });
     if (sharedTotalsError) throw sharedTotalsError;
     if (!isRecord(sharedTotals)) throw new Error("Shared order pricing returned an invalid quote");
@@ -373,12 +404,25 @@ Deno.serve(async (req: Request) => {
     // country markups); the RPC only supplies the commission rate and the FX financial snapshot.
     const sharedSubtotal = Number(quote.subtotal);
     const commissionPercent = Number(sharedTotals.commission_percent);
-    const platformHandlingCharge = Math.round(
+    const platformHandlingCharge = market === "EU" ? 0 : Math.round(
       (sharedSubtotal - quote.offerDiscount + shipping) * commissionPercent,
     ) / 100;
     const sharedRpcTotal = Math.round((sharedSubtotal + shipping + platformHandlingCharge) * 100) / 100;
     if (!isRecord(sharedTotals.financial_snapshot)) {
       throw new Error("Shared order pricing returned no financial snapshot");
+    }
+    if (market === "EU" && sharedTotals.financial_snapshot.buyer_currency !== "EUR") {
+      throw new Error("Shared order pricing returned an invalid currency");
+    }
+    const sellerCurrency = String(sharedTotals.financial_snapshot.seller_currency || "").toUpperCase();
+    const sellerRate = Number(sharedTotals.financial_snapshot.seller_rate);
+    if (market === "EU" && (
+      !rates[sellerCurrency] || !Number.isFinite(sellerRate) || sellerRate <= 0 ||
+      sellerRate !== rates[sellerCurrency] ||
+      Number(sharedTotals.financial_snapshot.buyer_rate) !== rates.EUR ||
+      Number(sharedTotals.financial_snapshot.inr_rate) !== rates.INR
+    )) {
+      throw new Error("Checkout exchange rates changed. Return to review and try again.");
     }
     if (![sharedSubtotal, sharedRpcTotal, platformHandlingCharge, commissionPercent].every(Number.isFinite) ||
         commissionPercent < 0 ||
@@ -399,7 +443,11 @@ Deno.serve(async (req: Request) => {
       if (!Number.isFinite(sellerUnitPrice) || sellerUnitPrice <= 0) {
         throw new Error("A seller price could not be captured for checkout");
       }
-      return { ...line, seller_unit_price: sellerUnitPrice };
+      const sourceCurrency = String(product.currency || "").toUpperCase();
+      const capturedSellerUnitPrice = market === "EU"
+        ? captureEuSellerUnitPrice(sellerUnitPrice, sourceCurrency, sellerCurrency, rates)
+        : sellerUnitPrice;
+      return { ...line, seller_unit_price: capturedSellerUnitPrice };
     });
     const total = calculateUkHostedCheckoutTotal(sharedRpcTotal, quote.offerDiscount);
     const amount = Math.round(total * 100);
@@ -422,7 +470,7 @@ Deno.serve(async (req: Request) => {
       stripe_account_id: accountId,
       livemode: /^(sk|rk)_live_/.test(stripeKey),
       amount_minor: amount,
-      currency: "gbp",
+      currency: currency.toLowerCase(),
       quote: {
         subtotal: sharedSubtotal,
         offer_discount: quote.offerDiscount,
@@ -438,7 +486,7 @@ Deno.serve(async (req: Request) => {
         p_user_id: auth.user.id, p_items: rpcItems,
         p_shipping_address: shippingAddress, p_billing_address: shippingAddress,
         p_phone: text(body.customerPhone), p_notes: text(body.notes),
-        p_currency: "GBP", p_country: "United Kingdom",
+        p_currency: currency, p_country: orderCountry,
         p_shipping_charge: shipping, p_actual_shipping_cost: quote.actualShippingCost,
         p_platform_shipping_margin: quote.platformShippingMargin,
         p_shipping_carrier: selected?.carrierName || null,
@@ -476,7 +524,7 @@ Deno.serve(async (req: Request) => {
         const offerDiscount = Number(competingQuote.offer_discount);
         const platformHandlingCharge = Number(competingQuote.platform_handling_charge);
         if (
-          competing.currency === "gbp"
+          competing.currency === currency.toLowerCase()
           && [total, subtotal, shipping, offerDiscount, platformHandlingCharge].every(Number.isFinite)
           && total > 0
           && subtotal > 0
@@ -487,7 +535,7 @@ Deno.serve(async (req: Request) => {
         ) {
           return json({
             snapshotId: competing.id,
-            currency: "GBP",
+            currency,
             total,
             shipping,
             subtotal,
@@ -501,7 +549,7 @@ Deno.serve(async (req: Request) => {
     if (saveError || !saved?.id) throw saveError || new Error("Could not save checkout quote");
     return json({
       snapshotId: saved.id,
-      currency: "GBP",
+      currency,
       total,
       shipping,
       subtotal: sharedSubtotal,

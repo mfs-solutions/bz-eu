@@ -39,6 +39,16 @@ const europeanCountryTokens = new Set(europeanCountries.flat().map((country) => 
 export const isEuropeanCountry = (country: string): boolean =>
   isUKCountry(country) || europeanCountryTokens.has(String(country || '').trim().toUpperCase());
 
+export const getEuropeanCountryCode = (country: string): string | null => {
+  const token = String(country || '').trim().toUpperCase();
+  if (isUKCountry(country) || ['ENGLAND', 'SCOTLAND', 'WALES', 'NORTHERN IRELAND'].includes(token)) {
+    return 'GB';
+  }
+  return europeanCountries.find((aliases) =>
+    aliases.some((alias) => alias.trim().toUpperCase() === token)
+  )?.[0] ?? null;
+};
+
 export const isUKCountry = (country: string): boolean => {
   const token = String(country || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
   return [

@@ -162,6 +162,10 @@ verify_jwt = false
 [functions.stripe-webhook]
 verify_jwt = false
 
+[functions.quote-uk-hosted-checkout]
+verify_jwt = true
+import_map = "./functions/quote-uk-hosted-checkout/deno.json"
+
 [functions.uk-hosted-checkout-webhook]
 verify_jwt = false
 

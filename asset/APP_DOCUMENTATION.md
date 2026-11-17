@@ -388,6 +388,17 @@ checkout-session row, not in a second payment table. Paid-order recovery is
 idempotent. Buyer, seller, and
 admin in-app notifications, email, and push use the existing services with
 retry-safe UK state.
+
+The EU/EUR backend migration `20261117010000_eur_hosted_checkout.sql` and the
+hosted-checkout functions were deployed on 2026-11-17. Quote requests from EU
+domains, or requests specifying `market: "EU"`, use EUR and validate European
+addresses. The EU buyer handling charge is 0%, as in the UK. EUR quote and
+session creation require `EU_HOSTED_CHECKOUT_ENABLED=true`. The EU frontend
+is enabled by default and can be disabled at build time with
+`VITE_EU_HOSTED_CHECKOUT=false`. A complete live EUR payment, webhook, order
+recovery, shipping, and seller accounting have not yet been verified. The GBP
+path continues to use the existing UK RPCs and configuration.
+
 The return-experience update adds
 `supabase/migrations/20261112193000_uk_checkout_failure_confirmation.sql`;
 apply it before deploying the updated verification and webhook functions.

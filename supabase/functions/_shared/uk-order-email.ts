@@ -1,6 +1,6 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-type Database = ReturnType<typeof createClient>;
+type Database = SupabaseClient;
 
 async function deliverUkOrderEmail(
   db: Database,
@@ -164,7 +164,7 @@ export async function sendUkOrderPush(
   try {
     const [{ data: order, error: orderError }, { data: items, error: itemsError },
       { data: admins, error: adminError }] = await Promise.all([
-      db.from("orders").select("id,user_id,order_number").eq("id", orderId).single(),
+      db.from("orders").select("id,user_id,order_number,currency").eq("id", orderId).single(),
       db.from("order_items").select("seller_id").eq("order_id", orderId),
       db.from("profiles").select("id").eq("role", "admin"),
     ]);
@@ -192,7 +192,9 @@ export async function sendUkOrderPush(
         orderId,
         recipientUserIds,
         title: "Order placed successfully",
-        message: "Your UK order has been placed and is being processed.",
+        message: String(order.currency).toUpperCase() === "EUR"
+          ? "Your order has been placed and is being processed."
+          : "Your UK order has been placed and is being processed.",
         type: "order_placed",
         metadata: { order_id: orderId, order_number: order.order_number, snapshot_id: snapshotId },
       }),

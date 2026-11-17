@@ -53,6 +53,24 @@ describe('UK hosted checkout return experience', () => {
     await waitFor(() => expect(mocks.syncCartWithBackend).toHaveBeenCalledWith('buyer-1'));
   });
 
+  it('shows a verified EUR payment using the returned currency', async () => {
+    mocks.invoke.mockResolvedValue({
+      data: { status: 'success', orderId: 'order-456', orderNumber: 'EU-2042', amount: 24.5, currency: 'EUR' },
+      error: null,
+    });
+    render(
+      <MemoryRouter initialEntries={['/checkout/uk-payment-return?session_id=cs_live_valid123']}>
+        <UkHostedCheckoutReturn />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole('heading', { name: 'Payment Successful!' })).toBeInTheDocument();
+    expect(screen.getByText('EU-2042')).toBeInTheDocument();
+    expect(screen.getByText('€24.50')).toBeInTheDocument();
+    expect(mocks.invoke).toHaveBeenCalledWith('verify-uk-hosted-checkout', {
+      body: { sessionId: 'cs_live_valid123', action: 'verify' },
+    });
+  });
+
   it('does not show success from the Stripe return URL until the backend reports a confirmed order', async () => {
     mocks.invoke.mockResolvedValue({ data: { status: 'processing' }, error: null });
 

@@ -2,8 +2,10 @@
 
 European BZEAD buyer storefront using the shared Supabase marketplace backend.
 The EU build displays EUR and limits checkout delivery addresses to European countries.
-This is a frontend-only restriction. EU payments are disabled until an EU-compatible
-backend is configured and the frontend is integrated and verified.
+EU hosted checkout is enabled by default; set `VITE_EU_HOSTED_CHECKOUT=false`
+to disable it at build time. The backend also requires
+`EU_HOSTED_CHECKOUT_ENABLED=true`. A complete live EUR payment and recovery
+have not yet been verified.
 
 `npm run dev` and `npm run build:buyer` use the EU market; `npm run dev:uk`
 and `npm run build:uk` retain the UK configuration. Set `VITE_PUBLIC_APP_URL`

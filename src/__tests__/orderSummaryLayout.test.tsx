@@ -1,3 +1,4 @@
+// @vitest-environment-options {"url": "https://bzead.eu/"}
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   fetchMultiSellerTat: vi.fn(),
   checkDeliveryServiceability: vi.fn(),
   supabaseFrom: vi.fn(),
+  invoke: vi.fn(),
 }));
 
 vi.mock('../config/market', async (importOriginal) => ({
@@ -41,7 +43,7 @@ vi.mock('../lib/tatService', () => ({
   checkDeliveryServiceability: mocks.checkDeliveryServiceability,
 }));
 vi.mock('../lib/supabase', () => ({
-  supabase: { from: mocks.supabaseFrom },
+  supabase: { from: mocks.supabaseFrom, functions: { invoke: mocks.invoke } },
 }));
 vi.mock('react-router-dom', async (importOriginal) => ({
   ...(await importOriginal<typeof import('react-router-dom')>()),
@@ -52,6 +54,8 @@ describe('checkout order summary layout', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.isEu = false;
+    mocks.rates = {};
+    vi.stubEnv('VITE_EU_HOSTED_CHECKOUT', 'false');
     localStorage.clear();
     sessionStorage.clear();
     mocks.fetchPublicPrices.mockResolvedValue({
@@ -61,7 +65,7 @@ describe('checkout order summary layout', () => {
     mocks.fetchMultiSellerTat.mockResolvedValue({ maxTatDays: 0, maxExpectedDate: null });
     mocks.checkDeliveryServiceability.mockResolvedValue({ serviceable: true, codAvailable: true });
     mocks.supabaseFrom.mockReturnValue({
-      select: () => ({ in: () => Promise.resolve({ data: [{ id: 'p1', name: 'Test product', package_weight: 1 }] }) }),
+      select: () => ({ in: () => Promise.resolve({ data: [{ id: 'p1', name: 'Test product', package_weight: 1, stock: 5 }] }) }),
     });
     localStorage.setItem('beauzead_checkout_shipping', JSON.stringify({
       fullName: 'Test Buyer', street: 'Main Road', street2: 'Near market',
@@ -154,7 +158,7 @@ describe('checkout order summary layout', () => {
     });
   });
 
-  it('prevents EU payments until the backend is integrated', async () => {
+  it('prevents EU payments when hosted checkout is explicitly disabled', async () => {
     mocks.isEu = true;
     localStorage.setItem('beauzead_checkout_shipping', JSON.stringify({
       fullName: 'Test Buyer', street: 'Main Road', city: 'Paris',
@@ -166,6 +170,94 @@ describe('checkout order summary layout', () => {
     expect(screen.getByRole('button', { name: 'Payment unavailable' })).toBeDisabled();
     await waitFor(() => expect(mocks.calculatePricing).toHaveBeenCalledWith(
       expect.objectContaining({ destinationCountry: 'France', targetCurrency: 'EUR' }),
+    ));
+  });
+
+  it('uses the hosted EUR quote and creates a session by default', async () => {
+    mocks.isEu = true;
+    mocks.rates = { INR: 100, EUR: 1 };
+    vi.stubEnv('VITE_EU_HOSTED_CHECKOUT', undefined);
+    localStorage.setItem('beauzead_checkout_shipping', JSON.stringify({
+      fullName: 'Test Buyer', street: 'Main Road', city: 'Paris',
+      state: 'Paris', postalCode: '75001', country: 'France', countryCode: 'FRA',
+    }));
+    mocks.calculatePricing.mockResolvedValue({
+      subtotal: 2, total: 2, shipping: 0, currency: 'EUR',
+      items: [{ cartItemId: 'item-1', productId: 'p1', sourceCurrency: 'INR', convertedUnitPrice: 1 }],
+      codEligible: false, codIneligibleItems: [],
+    });
+    mocks.invoke.mockImplementation(async (name: string) => name === 'quote-uk-hosted-checkout'
+      ? { data: { snapshotId: 'snapshot-1', total: 2, currency: 'EUR' }, error: null }
+      : { data: { checkoutUrl: 'https://checkout.stripe.com/c/pay/test', sessionId: 'cs_test_valid123' }, error: null });
+    const navigationWarning = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    render(<MemoryRouter><OrderSummaryPage /></MemoryRouter>);
+    const button = await screen.findByRole('button', { name: 'Continue to Stripe' });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith(
+      'quote-uk-hosted-checkout',
+      { body: expect.objectContaining({ market: 'EU', shippingAddress: expect.objectContaining({ country: 'France' }) }) },
+    ));
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith(
+      'create-uk-hosted-checkout', { body: { snapshotId: 'snapshot-1' } },
+    ));
+    await waitFor(() => {
+      expect(localStorage.getItem('beauzead_uk_pending_checkout_session')).toBe('cs_test_valid123');
+      expect(localStorage.getItem('beauzead_uk_pending_checkout_snapshot')).toBe('snapshot-1');
+    });
+    navigationWarning.mockRestore();
+  });
+
+  it('rejects a GBP quote instead of opening a EUR payment session', async () => {
+    mocks.isEu = true;
+    mocks.rates = { INR: 100, EUR: 1 };
+    vi.stubEnv('VITE_EU_HOSTED_CHECKOUT', 'true');
+    localStorage.setItem('beauzead_checkout_shipping', JSON.stringify({
+      fullName: 'Test Buyer', street: 'Main Road', city: 'Paris',
+      state: 'Paris', postalCode: '75001', country: 'France',
+    }));
+    mocks.calculatePricing.mockResolvedValue({
+      subtotal: 2, total: 2, shipping: 0, currency: 'EUR',
+      items: [{ cartItemId: 'item-1', productId: 'p1', sourceCurrency: 'INR', convertedUnitPrice: 1 }],
+      codEligible: false, codIneligibleItems: [],
+    });
+    mocks.invoke.mockResolvedValue({ data: { snapshotId: 'snapshot-1', total: 2, currency: 'GBP' }, error: null });
+
+    render(<MemoryRouter><OrderSummaryPage /></MemoryRouter>);
+    const button = await screen.findByRole('button', { name: 'Continue to Stripe' });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    expect(await screen.findByText('The checkout quote is invalid. Please return to review.')).toBeInTheDocument();
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires review before creating a session when the verified EUR total changes', async () => {
+    mocks.isEu = true;
+    mocks.rates = { INR: 100, EUR: 1 };
+    vi.stubEnv('VITE_EU_HOSTED_CHECKOUT', 'true');
+    localStorage.setItem('beauzead_checkout_shipping', JSON.stringify({
+      fullName: 'Test Buyer', street: 'Main Road', city: 'Paris',
+      state: 'Paris', postalCode: '75001', country: 'France',
+    }));
+    mocks.calculatePricing.mockResolvedValue({
+      subtotal: 2, total: 2, shipping: 0, currency: 'EUR',
+      items: [{ cartItemId: 'item-1', productId: 'p1', sourceCurrency: 'INR', convertedUnitPrice: 1 }],
+      codEligible: false, codIneligibleItems: [],
+    });
+    mocks.invoke.mockImplementation(async (name: string) => name === 'quote-uk-hosted-checkout'
+      ? { data: { snapshotId: 'snapshot-1', total: 3, currency: 'EUR' }, error: null }
+      : { data: null, error: new Error('Unable to open payment page') });
+
+    render(<MemoryRouter><OrderSummaryPage /></MemoryRouter>);
+    const button = await screen.findByRole('button', { name: 'Continue to Stripe' });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    const confirmButton = await screen.findByRole('button', { name: 'Accept updated total and continue to Stripe' });
+    expect(mocks.invoke).toHaveBeenCalledTimes(1);
+    fireEvent.click(confirmButton);
+    await waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith(
+      'create-uk-hosted-checkout', { body: { snapshotId: 'snapshot-1' } },
     ));
   });
 
