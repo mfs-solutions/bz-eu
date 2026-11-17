@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { Home, Briefcase, Loader2, Truck, X, MapPin, Plus, Search, LocateFixed } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../../contexts/AuthContext';
 import type { UseDeliveryEstimateReturn } from '../../hooks/useDeliveryEstimate';
-import { detectLocationWithCaching } from '../../lib/locationService';
+import { detectPostcodeFromCurrentLocation } from '../../lib/postcodeLookupService';
+import { IS_EU_STOREFRONT } from '../../config/market';
 
 interface DeliveryEstimateProps {
   delivery: UseDeliveryEstimateReturn;
@@ -22,14 +22,17 @@ export const DeliveryEstimate: React.FC<DeliveryEstimateProps> = ({ delivery }) 
     setPincode,
     setCountry,
     checkDelivery,
+    isDeliverableCountry,
+    deliveryCountries,
   } = delivery;
 
-  const { user } = useAuth();
   const navigate = useNavigate();
   const [showAddressPicker, setShowAddressPicker] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [locating, setLocating] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
+  const [manualCountry, setManualCountry] = useState('');
+  const [manualPostcode, setManualPostcode] = useState('');
 
   const addressTypeLabel =
     address?.address_type === 'home' ? 'HOME' :
@@ -50,50 +53,47 @@ export const DeliveryEstimate: React.FC<DeliveryEstimateProps> = ({ delivery }) 
     ? `${address.street_address_1}${address.street_address_2 ? `, ${address.street_address_2}` : ''}${address.city ? `, ${address.city}` : ''}`
     : 'Select delivery location';
 
+  const applyLocation = async (postalCode: string, country: string) => {
+    setPincode(postalCode);
+    setCountry(country);
+    await checkDelivery({ pincode: postalCode, country });
+    setShowAddressPicker(false);
+  };
+
   const handleUseCurrentLocation = async () => {
     setLocating(true);
     setLocationError(null);
     try {
-      const { data, error: locError } = await detectLocationWithCaching({
-        userId: user?.id || null,
-        forceRefresh: true,
-      });
+      const detected = await detectPostcodeFromCurrentLocation();
 
-      if (locError) {
-        setLocationError(locError);
+      if (!isDeliverableCountry(detected.countryCode || detected.country)) {
+        setLocationError(`We only deliver to EU countries. Your current location is in ${detected.country || 'an unsupported country'}.`);
         return;
       }
 
-      let resolvedPostal = String(data?.postalCode || '').trim();
-      let resolvedCountry = String(data?.country || data?.countryCode || '').trim();
-
-      // Some reverse-geocode responses contain city/state but miss postcode.
-      // Retry through cached/IP-assisted detection before failing hard.
-      if (!resolvedPostal) {
-        const fallback = await detectLocationWithCaching({
-          userId: user?.id || null,
-          forceRefresh: false,
-        });
-        if (fallback.data?.postalCode) {
-          resolvedPostal = String(fallback.data.postalCode).trim();
-        }
-        if (!resolvedCountry && (fallback.data?.country || fallback.data?.countryCode)) {
-          resolvedCountry = String(fallback.data.country || fallback.data.countryCode || '').trim();
-        }
-      }
-
-      if (!resolvedPostal) {
-        setLocationError('Could not detect postal code from your current location. Please select a saved address.');
+      if (!detected.postalCode) {
+        setManualCountry(detected.country);
+        setLocationError('We found your country but not the postcode. Please enter it below.');
         return;
       }
 
-      setPincode(resolvedPostal);
-      setCountry(resolvedCountry);
-      await checkDelivery();
-      setShowAddressPicker(false);
+      await applyLocation(detected.postalCode, detected.country);
+    } catch (err) {
+      setLocationError(err instanceof Error ? err.message : 'Unable to detect your location. Please enter your postcode manually.');
     } finally {
       setLocating(false);
     }
+  };
+
+  const handleManualPostcode = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const postcode = manualPostcode.trim();
+    if (!manualCountry || postcode.length < 3) {
+      setLocationError('Select a country and enter a valid postcode.');
+      return;
+    }
+    setLocationError(null);
+    await applyLocation(postcode, manualCountry);
   };
 
   return (
@@ -163,6 +163,33 @@ export const DeliveryEstimate: React.FC<DeliveryEstimateProps> = ({ delivery }) 
                 Use my current location
               </button>
               {locationError && <p className="mt-2 text-[12px] text-red-600">{locationError}</p>}
+
+              {IS_EU_STOREFRONT && (
+                <form onSubmit={(event) => void handleManualPostcode(event)} className="mt-4 flex gap-2">
+                  <select
+                    aria-label="Delivery country"
+                    value={manualCountry}
+                    onChange={(e) => setManualCountry(e.target.value)}
+                    className="h-11 w-[45%] rounded-xl border border-gray-300 px-2 text-[13px] text-[#111111] outline-none focus:border-blue-500"
+                  >
+                    <option value="">Country</option>
+                    {deliveryCountries.map((country) => (
+                      <option key={country.id} value={country.country_name}>{country.country_name}</option>
+                    ))}
+                  </select>
+                  <input
+                    type="text"
+                    aria-label="Postcode"
+                    value={manualPostcode}
+                    onChange={(e) => setManualPostcode(e.target.value.replace(/[^A-Za-z0-9\s-]/g, '').slice(0, 10))}
+                    placeholder="Postcode"
+                    className="h-11 min-w-0 flex-1 rounded-xl border border-gray-300 px-3 text-[13px] text-[#111111] outline-none focus:border-blue-500"
+                  />
+                  <button type="submit" className="h-11 rounded-xl bg-[#1f67ff] px-4 text-[13px] font-semibold text-white">
+                    Check
+                  </button>
+                </form>
+              )}
             </div>
 
             <div className="px-5 py-4 flex items-center justify-between border-b border-dashed border-gray-200">

@@ -159,6 +159,9 @@ verify_jwt = false
 [functions.shiprocket-rate]
 verify_jwt = false
 
+[functions.detect-postcode]
+verify_jwt = false
+
 [functions.stripe-webhook]
 verify_jwt = false
 

@@ -13,6 +13,8 @@ import {
 } from '../lib/tatService';
 import { checkInternationalServiceability } from '../lib/shiprocketOpsService';
 import { supabase } from '../lib/supabase';
+import { fetchEuCountries, isCountryInOptions, type Country } from '../lib/shippingDataService';
+import { IS_EU_STOREFRONT } from '../config/market';
 import type { UserAddress } from '../types';
 
 type RateCardCountryRow = {
@@ -172,8 +174,12 @@ export interface UseDeliveryEstimateReturn extends DeliveryEstimateState {
   setPincode: (value: string) => void;
   /** Manually update destination country (for guest users) */
   setCountry: (value: string) => void;
-  /** Trigger a manual delivery check */
-  checkDelivery: () => Promise<void>;
+  /** Trigger a delivery check, optionally with values that have not been committed to state yet */
+  checkDelivery: (override?: { pincode: string; country: string }) => Promise<void>;
+  /** Whether a country is deliverable on this storefront (always true outside the EU storefront) */
+  isDeliverableCountry: (value: string) => boolean;
+  /** EU delivery countries for manual entry (empty outside the EU storefront) */
+  deliveryCountries: Country[];
 }
 
 export function useDeliveryEstimate(
@@ -195,17 +201,33 @@ export function useDeliveryEstimate(
   const [error, setError] = useState<string | null>(null);
   const autoChecked = useRef(false);
   const addressesLoaded = useRef(false);
+  // null while the EU delivery countries are loading; non-EU storefronts need no list
+  const [euCountries, setEuCountries] = useState<Country[] | null>(IS_EU_STOREFRONT ? null : []);
+
+  useEffect(() => {
+    if (!IS_EU_STOREFRONT) return;
+    let cancelled = false;
+    void fetchEuCountries().then(({ data }) => {
+      if (!cancelled) setEuCountries(data);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const isDeliverableCountry = useCallback(
+    (value: string) => !IS_EU_STOREFRONT || isCountryInOptions(value, euCountries || []),
+    [euCountries],
+  );
 
   /* ── Load addresses once ── */
   useEffect(() => {
-    if (!userId || addressesLoaded.current) return;
+    if (!userId || addressesLoaded.current || euCountries === null) return;
     let cancelled = false;
 
     (async () => {
       const { data } = await getUserAddresses(userId);
       if (cancelled) return;
       addressesLoaded.current = true;
-      const list = (data || []) as UserAddress[];
+      const list = ((data || []) as UserAddress[]).filter((a) => isDeliverableCountry(a.country));
       setAddresses(list);
       const defaultAddr = list.find((a) => a.is_default) || list[0] || null;
       if (defaultAddr) {
@@ -216,20 +238,21 @@ export function useDeliveryEstimate(
     })();
 
     return () => { cancelled = true; };
-  }, [userId]);
+  }, [userId, euCountries, isDeliverableCountry]);
 
   /* ── Guest fallback: detected location ── */
   useEffect(() => {
-    if (userId || pincode) return;
+    if (userId || pincode || euCountries === null) return;
     try {
       const stored = localStorage.getItem('beauzead_detected_location');
       if (stored) {
         const loc = JSON.parse(stored);
+        if (!isDeliverableCountry(String(loc.country || loc.countryCode || ''))) return;
         if (loc.postalCode) setPincodeRaw(String(loc.postalCode));
         if (loc.country) setCountryRaw(String(loc.country));
       }
     } catch { /* ignore */ }
-  }, [userId, pincode]);
+  }, [userId, pincode, euCountries, isDeliverableCountry]);
 
   /* ── Core check: carrier-routed ── */
   const runCheck = useCallback(async (
@@ -423,10 +446,10 @@ export function useDeliveryEstimate(
   }, []);
 
   /* ── Public: Manual check trigger ── */
-  const checkDelivery = useCallback(async () => {
-    const pin = pincode.trim();
+  const checkDelivery = useCallback(async (override?: { pincode: string; country: string }) => {
+    const pin = (override?.pincode ?? pincode).trim();
     if (pin.length < 3 || !productId) return;
-    await runCheck(pin, country, productOriginCountry || '', productId, userId || '');
+    await runCheck(pin, override?.country ?? country, productOriginCountry || '', productId, userId || '');
   }, [pincode, country, productOriginCountry, productId, userId, runCheck]);
 
   return {
@@ -443,5 +466,7 @@ export function useDeliveryEstimate(
     setPincode,
     setCountry,
     checkDelivery,
+    isDeliverableCountry,
+    deliveryCountries: euCountries || [],
   };
 }
